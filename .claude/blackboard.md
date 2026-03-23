@@ -1,28 +1,66 @@
-# marimo — Reactive Notebook Frontend
+# Polyglot Notebook — Single Binary Architecture
 
-## Role in Stack
-marimo is the frontend. Its reactive execution model (cells auto-rerun when
-dependencies change) eliminates Jupyter's hidden-state problem. This makes it
-better for both humans (no stale cells) and AI agents (write a cell, deps propagate).
+## The Binary
 
-## Current State
-- Python-only (no polyglot kernel support)
-- No Jupyter kernel protocol — talks directly to its own Python runtime
-- Stored as .py files (git-friendly, not .ipynb)
-- Can deploy notebooks as web apps
+One `cargo build`. Ships as one executable. Contains:
 
-## Our Fork's Mission
-Bridge marimo's reactive frontend to the Jupyter kernel wire protocol so it can
-drive: evcxr (Rust), IRkernel (R), and custom graph magics (%%cypher, %%gremlin,
-%%sparql, %%nars).
+```
+reactive runtime     (transcoded from marimo Python)
+graph query engines  (transcoded from graph-notebook Python)
+kernel protocol      (Rust-native ZMQ, from kernel-protocol spec)
+document publisher   (transcoded from quarto TS/Deno)
+local graph database (lance-graph, already Rust)
+SIMD kernels         (ndarray, already Rust)
+graph compiler       (rs-graph-llm, already Rust)
+web frontend         (marimo's JS/React, served by the binary)
+```
 
-## Integration Points
-- **kernel-protocol** → ZMQ wire format spec (what we implement)
-- **graph-notebook** → magics to extract and wire through kernel protocol
-- **lance-graph** → local %%cypher executes via semiring planner, not remote DB
-- **quarto-r** → R cells for Bardioc/almato
-- **ndarray** → SIMD kernels available in Rust cells via evcxr
+External process: R only (Bardioc/almato). Speaks Arrow IPC to the binary.
 
-## Upstream Tracking
-Fork of github.com/marimo-team/marimo. Track upstream main.
-Our changes go on feature branches, not main.
+## Repos → Crates
+
+| Repo (source) | Becomes | Work |
+|------|---------|------|
+| marimo | `crate::runtime` + `crate::server` | Transcode Python→Rust |
+| graph-notebook | `crate::query::{cypher,gremlin,sparql,nars}` | Transcode Python→Rust |
+| kernel-protocol | `crate::kernel` | Implement from spec in Rust |
+| quarto | `crate::publish` | Transcode TS→Rust |
+| quarto-r | external R process | Stays R, Arrow IPC bridge |
+| lance-graph | `crate::graph` | Already Rust, integrate |
+| ndarray | `crate::simd` + `crate::linalg` | Already Rust, integrate |
+| rs-graph-llm | `crate::compiler` | Already Rust, fix build |
+
+## Scopes (parallel, non-overlapping)
+
+### SCOPE A: Reactive Runtime (marimo → Rust)
+Transcode marimo's reactive cell execution model to Rust.
+The core insight: cells have dependencies, when a cell's input changes,
+downstream cells re-execute. That's a DAG scheduler — natural in Rust.
+
+### SCOPE B: Query Engines (graph-notebook → Rust)
+Transcode graph-notebook's Cypher/Gremlin/SPARQL executors to Rust.
+Bolt protocol client, WebSocket client, HTTP client — all Rust-native.
+Add local path: Cypher → lance-graph semiring (no network).
+
+### SCOPE C: Kernel Protocol (kernel-protocol spec → Rust)
+Implement Jupyter kernel wire protocol in Rust.
+Only needed for R (IRkernel) — everything else runs in-process.
+ZMQ via zeromq-rs. Connection file parsing. Message ser/de.
+
+### SCOPE D: Publisher (quarto TS → Rust)
+Transcode Quarto's document rendering pipeline to Rust.
+Pandoc AST manipulation. Markdown → PDF/HTML.
+Custom graph visualization extension.
+
+### SCOPE E: Integration (lance-graph + ndarray + rs-graph-llm)
+Wire the existing Rust crates into the binary.
+Fix rs-graph-llm build. SIMD kernels for graph ops.
+This is mostly Cargo.toml workspace wiring + API surface.
+
+## Decisions
+[DECISION] One binary, no Python runtime
+[DECISION] marimo's JS frontend served by Rust HTTP server (axum/actix)
+[DECISION] R is the ONLY external process (Arrow IPC bridge)
+[DECISION] Cypher executes locally via lance-graph semiring by default
+[DECISION] Remote DB connections (Neo4j, FalkorDB) via native Bolt client
+[DECISION] vis.js graph rendering served as static assets by the binary
